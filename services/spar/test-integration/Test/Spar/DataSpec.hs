@@ -1,6 +1,7 @@
 {-# LANGUAGE FlexibleContexts    #-}
 {-# LANGUAGE GADTs               #-}
 {-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE QuasiQuotes         #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications    #-}
 {-# LANGUAGE ViewPatterns        #-}
@@ -14,7 +15,9 @@ import Control.Exception
 import Control.Monad.Reader
 import Control.Monad.Catch
 import Data.Aeson (encode)
+import Data.Either (isRight)
 import Data.Id
+import Data.Maybe (isJust)
 import Data.String.Conversions
 import Data.Time
 import Data.UUID as UUID
@@ -26,10 +29,13 @@ import Spar.API.Instances ()
 import Spar.Options as Options
 import Util
 import Util.Options
+import URI.ByteString.QQ
 
+import qualified Data.List as List
 import qualified SAML2.WebSSO as SAML
-import qualified Servant as Servant
+import qualified Servant
 import qualified Servant.Client as Servant
+import qualified Text.XML as XML
 import qualified Text.XML.Util as SAML
 
 
@@ -185,6 +191,39 @@ spec = do
           runGetUser env uref `shouldRespondWith` getIs (Just uid')
 
 
+    -- access verdict
+
+    let runPostVerdict :: TestEnv -> SAML.AccessVerdict -> Http SAML.ResponseVerdict
+        runPostVerdict env = runServantClient env . clientPostVerdict
+
+    describe "accessVerdict" $ do
+      context "web" $ do
+        context "denied" $ do
+          it "responds with status 200 and a valid html page with constant expected title." $ do
+            env <- ask
+            runPostVerdict env (SAML.AccessDenied ["we don't like you", "seriously"])
+              `shouldRespondWith` \outcome -> and
+                [ Servant.errHTTPCode outcome == 200
+                , Servant.errReasonPhrase outcome == "forbidden"
+                , "<title>wire:sso:error:forbidden</title>" `List.isInfixOf` cs @LBS @String (Servant.errBody outcome)
+                , isRight $ XML.parseLBS XML.def (Servant.errBody outcome)
+                ]
+
+        context "granted" $ do
+          it "responds with status 200 and a valid html page with constant expected title." $ do
+            env <- ask
+            let tenant  = SAML.Issuer [uri|http://idp.com/|]
+                subject = SAML.opaqueNameID "blee"
+            runPostVerdict env (SAML.AccessGranted (SAML.UserRef tenant subject))
+              `shouldRespondWith` \outcome -> and
+                [ Servant.errHTTPCode outcome == 200
+                , Servant.errReasonPhrase outcome == "success"
+                , "<title>wire:sso:success</title>" `List.isInfixOf` cs @LBS @String (Servant.errBody outcome)
+                , isRight $ XML.parseLBS XML.def (Servant.errBody outcome)
+                , isJust . List.lookup "Set-Cookies" . Servant.errHeaders $ outcome
+                ]
+
+
 runServantClient :: TestEnv -> Servant.ClientM a -> Http a
 runServantClient tenv = hoist . (`Servant.runClientM` cenv)
   where
@@ -203,10 +242,12 @@ clientGetRequest    :: SAML.ID SAML.AuthnRequest -> Servant.ClientM Bool
 clientPostAssertion :: SAML.ID SAML.Assertion -> SAML.Time -> Servant.ClientM Bool
 clientPostUser      :: SAML.UserRef -> UserId -> Servant.ClientM ()
 clientGetUser       :: SAML.UserRef -> Servant.ClientM (Maybe UserId)
+clientPostVerdict   :: SAML.AccessVerdict -> Servant.ClientM Servant.ServantErr
 
 clientPostRequest     Servant.:<|>
   clientGetRequest    Servant.:<|>
   clientPostAssertion Servant.:<|>
   clientPostUser      Servant.:<|>
-  clientGetUser
+  clientGetUser       Servant.:<|>
+  clientPostVerdict
   = Servant.client (Servant.Proxy @IntegrationTests)

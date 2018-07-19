@@ -14,7 +14,6 @@ import Control.Concurrent
 import Control.Exception
 import Control.Monad.Reader
 import Control.Monad.Catch
-import Data.Aeson (encode)
 import Data.Either (isRight)
 import Data.Id
 import Data.Maybe (isJust)
@@ -147,13 +146,11 @@ spec = do
 
     -- users
 
-    let runInsertUser :: TestEnv -> SAML.UserRef -> UserId -> Http ResponseLBS  -- TODO: servant-client-ify
-        runInsertUser env uref uid = do
-          post $ (env ^. teSpar) . path ("/i/integration-tests/user/" <> cs (show uid)) . json uref
+    let runInsertUser :: TestEnv -> SAML.UserRef -> UserId -> Http ()
+        runInsertUser env uref = runServantClient env . clientPostUser uref
 
-        runGetUser :: TestEnv -> SAML.UserRef -> Http ResponseLBS
-        runGetUser env uref = do
-          get $ (env ^. teSpar) . path "/i/integration-tests/user" . json uref
+        runGetUser :: TestEnv -> SAML.UserRef -> Http (Maybe UserId)
+        runGetUser env = runServantClient env . clientGetUser
 
         nextUserRef :: MonadIO m => m SAML.UserRef
         nextUserRef = liftIO $ do
@@ -163,22 +160,19 @@ spec = do
             (SAML.Issuer $ SAML.unsafeParseURI ("http://" <> tenant))
             (SAML.opaqueNameID subject)
 
-        getIs :: Maybe UserId -> ResponseLBS -> Bool
-        getIs muid resp = statusCode resp == 200 && responseBody resp == (Just . cs . encode $ muid)
-
     describe "insertUser, getUser" $ do
       context "user is new" $ do
         it "getUser returns Nothing" $ do
           env  <- ask
           uref <- nextUserRef
-          runGetUser env uref `shouldRespondWith` getIs Nothing
+          runGetUser env uref `shouldRespondWith` (== Nothing)
 
         it "inserts new user and responds with 201 / returns new user" $ do
           env  <- ask
           uref <- nextUserRef
           uid  <- Id <$> liftIO UUID.nextRandom
-          runInsertUser env uref uid `shouldRespondWith` (\resp -> statusCode resp == 201)
-          runGetUser env uref `shouldRespondWith` getIs (Just uid)
+          runInsertUser env uref uid `shouldRespondWith` (== ())  -- no exception
+          runGetUser env uref `shouldRespondWith` (== Just uid)
 
       context "user already exists (idempotency)" $ do
         it "inserts new user and responds with 201 / returns new user" $ do
@@ -186,9 +180,9 @@ spec = do
           uref <- nextUserRef
           uid  <- Id <$> liftIO UUID.nextRandom
           uid' <- Id <$> liftIO UUID.nextRandom
-          runInsertUser env uref uid `shouldRespondWith` (\resp -> statusCode resp == 201)
-          runInsertUser env uref uid' `shouldRespondWith` (\resp -> statusCode resp == 201)
-          runGetUser env uref `shouldRespondWith` getIs (Just uid')
+          runInsertUser env uref uid `shouldRespondWith` (== ())
+          runInsertUser env uref uid' `shouldRespondWith` (== ())
+          runGetUser env uref `shouldRespondWith` (== Just uid')
 
 
     -- access verdict
